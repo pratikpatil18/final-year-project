@@ -1,0 +1,13 @@
+# dataset.yaml for YOLOv8
+# Path to dataset root
+path: ./data
+
+# Relative paths to images (relative to 'path')
+train: images/train
+val: images/val
+test: images/test  # optional; leave empty if no test set
+
+# Class names
+names:
+  0: Knife
+  1: Handgun

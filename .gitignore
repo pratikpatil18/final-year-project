@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.pyc
+
+# Virtual env
+venv/
+.venv/
+backend/.venv/
+.env
+.env.*
+
+# Database
+*.db
+
+# Build/dependency outputs
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.next/
+frontend/out/
+backend/venv/
+
+# Media files (large local assets)
+*.mp4
+
+# Model files
+*.pt
+
+# Runtime backend captures
+backend/screenshots/*.jpg
+backend/screenshots/*.png
+backend/uploads/*
+!backend/uploads/.gitkeep
+
+# VS Code
+.vscode/
+
+# Misc
+*.log
+
+# Keep shared docs screenshots
+!screenshots/*.png
+!screenshots/*.jpg

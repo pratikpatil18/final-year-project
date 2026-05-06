@@ -1,0 +1,14 @@
+{
+  "name": "ai-ranger-weapon-detection",
+  "private": true,
+  "scripts": {
+    "backend:venv": "python3 -m venv backend/.venv",
+    "backend:dev": "backend/.venv/bin/python backend/app.py",
+    "frontend:dev": "npm --prefix frontend run dev",
+    "dev": "npm --prefix frontend run dev",
+    "install:frontend": "npm --prefix frontend install",
+    "install:backend": "backend/.venv/bin/pip install -r backend/requirements.txt",
+    "setup:backend": "npm run backend:venv && npm run install:backend",
+    "build": "npm --prefix frontend run build"
+  }
+}
