@@ -7,9 +7,10 @@ from datetime import datetime
 from email.message import EmailMessage
 from pathlib import Path
 
-from flask import Flask, request, jsonify, send_from_directory
-from flask_cors import CORS
+import cv2
 from dotenv import load_dotenv
+from flask import Flask, jsonify, request, send_from_directory
+from flask_cors import CORS
 from ultralytics import YOLO
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -22,11 +23,14 @@ load_dotenv(BASE_DIR / ".env")
 app = Flask(__name__)
 CORS(app)
 
-MODEL_CANDIDATES = [
+MODEL_DEFAULT_CANDIDATES = [
     MODEL_PROJECT_DIR / "runs/train/weapon_detector2/weights/best.pt",
     MODEL_PROJECT_DIR / "models/yolov8n_custom.pt",
 ]
-DETECTION_CONFIDENCE = 0.35
+VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v"}
+DETECTION_CONFIDENCE = float(os.getenv("DETECTION_CONFIDENCE", "0.35"))
+VIDEO_FRAME_SAMPLE_SECONDS = float(os.getenv("VIDEO_FRAME_SAMPLE_SECONDS", "1.0"))
+MAX_VIDEO_SAMPLE_FRAMES = int(os.getenv("MAX_VIDEO_SAMPLE_FRAMES", "180"))
 SMTP_HOST = os.getenv("SMTP_HOST", "").strip()
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USERNAME = os.getenv("SMTP_USERNAME", "").strip()
@@ -36,15 +40,10 @@ ALERT_FROM_EMAIL = os.getenv("ALERT_FROM_EMAIL", SMTP_USERNAME).strip()
 ALERT_TO_EMAIL = os.getenv("ALERT_TO_EMAIL", "").strip()
 ALERT_SUBJECT_PREFIX = os.getenv("ALERT_SUBJECT_PREFIX", "AI Ranger Alert").strip()
 
-# ---------------------------------------------------------------------------
-# In-memory storage
-# ---------------------------------------------------------------------------
 detections = []
 model = None
+loaded_model_path = None
 
-# ---------------------------------------------------------------------------
-# Admin credentials
-# ---------------------------------------------------------------------------
 ADMIN_USERNAME = "sysadmin"
 ADMIN_PASSWORD = "Pass@123"
 
@@ -60,25 +59,87 @@ LOCATIONS = [
 ]
 
 
+def configured_model_path():
+    configured_path = os.getenv("MODEL_PATH", "").strip()
+    if not configured_path:
+        return None
+
+    path = Path(configured_path).expanduser()
+    if not path.is_absolute():
+        path = PROJECT_DIR / path
+    return path.resolve()
+
+
+def get_model_candidates():
+    candidates = []
+    seen = set()
+
+    def add_candidate(path):
+        normalized = str(path)
+        if normalized not in seen:
+            seen.add(normalized)
+            candidates.append(path)
+
+    explicit_path = configured_model_path()
+    if explicit_path is not None:
+        add_candidate(explicit_path)
+
+    for candidate in MODEL_DEFAULT_CANDIDATES:
+        add_candidate(candidate)
+
+    train_runs_dir = MODEL_PROJECT_DIR / "runs" / "train"
+    if train_runs_dir.exists():
+        for candidate in sorted(train_runs_dir.glob("**/weights/best.pt")):
+            add_candidate(candidate)
+
+    models_dir = MODEL_PROJECT_DIR / "models"
+    if models_dir.exists():
+        for candidate in sorted(models_dir.glob("*.pt")):
+            add_candidate(candidate)
+
+    return candidates
+
+
 def resolve_model_path():
-    for candidate in MODEL_CANDIDATES:
+    candidates = get_model_candidates()
+    for candidate in candidates:
         if candidate.exists():
             return candidate
-    return MODEL_CANDIDATES[0]
+    return candidates[0] if candidates else MODEL_DEFAULT_CANDIDATES[0]
 
 
-MODEL_PATH = resolve_model_path()
+def get_model_status():
+    candidates = get_model_candidates()
+    resolved_model_path = next((candidate for candidate in candidates if candidate.exists()), None)
+    configured_path = configured_model_path()
+
+    return {
+        "model_path": str(resolved_model_path or (candidates[0] if candidates else MODEL_DEFAULT_CANDIDATES[0])),
+        "model_ready": resolved_model_path is not None,
+        "configured_model_path": str(configured_path) if configured_path else None,
+        "model_candidates": [str(candidate) for candidate in candidates],
+        "hint": (
+            "Set MODEL_PATH in backend/.env to your trained .pt file, or restore "
+            "model/runs/train/weapon_detector2/weights/best.pt."
+        ),
+    }
 
 
 def get_model():
-    global model
+    global loaded_model_path, model
 
-    if model is None:
-        if not MODEL_PATH.exists():
-            raise FileNotFoundError(
-                f"YOLO weights not found. Expected one of: {', '.join(str(path) for path in MODEL_CANDIDATES)}"
-            )
-        model = YOLO(str(MODEL_PATH))
+    status = get_model_status()
+    model_path = Path(status["model_path"])
+
+    if not status["model_ready"]:
+        raise FileNotFoundError(
+            "YOLO weights not found. Set MODEL_PATH in backend/.env or restore "
+            "model/runs/train/weapon_detector2/weights/best.pt."
+        )
+
+    if model is None or loaded_model_path != model_path:
+        model = YOLO(str(model_path))
+        loaded_model_path = model_path
     return model
 
 
@@ -107,6 +168,12 @@ def extract_label_names(names, class_id):
     if isinstance(names, list) and class_id < len(names):
         return names[class_id]
     return str(class_id)
+
+
+def is_video_upload(file):
+    mimetype = (getattr(file, "mimetype", "") or "").lower()
+    extension = Path(file.filename or "").suffix.lower()
+    return mimetype.startswith("video/") or extension in VIDEO_EXTENSIONS
 
 
 def notifications_configured():
@@ -179,18 +246,7 @@ def send_detection_email(detection, attachment_path):
     }
 
 
-def run_detection(image_path):
-    results = get_model().predict(
-        source=str(image_path),
-        conf=DETECTION_CONFIDENCE,
-        verbose=False,
-    )
-    result = results[0]
-
-    annotated_filename = f"{image_path.stem}_annotated.jpg"
-    annotated_path = UPLOADS_DIR / annotated_filename
-    result.save(filename=str(annotated_path))
-
+def summarize_prediction_result(result):
     parsed_detections = []
     if result.boxes is not None:
         for box in result.boxes:
@@ -216,7 +272,6 @@ def run_detection(image_path):
         confidence = 0.0
 
     return {
-        "annotated_filename": annotated_filename,
         "detection_type": detection_type,
         "confidence": confidence,
         "severity": determine_severity(detection_type, confidence),
@@ -224,18 +279,115 @@ def run_detection(image_path):
     }
 
 
-# ---------------------------------------------------------------------------
-# Routes
-# ---------------------------------------------------------------------------
+def analyze_source(source):
+    results = get_model().predict(
+        source=source,
+        conf=DETECTION_CONFIDENCE,
+        verbose=False,
+    )
+    result = results[0]
+    return result, summarize_prediction_result(result)
+
+
+def save_annotated_result(result, output_stem):
+    annotated_filename = f"{output_stem}_annotated.jpg"
+    annotated_path = UPLOADS_DIR / annotated_filename
+    result.save(filename=str(annotated_path))
+    return annotated_filename
+
+
+def run_image_detection(image_path):
+    result, detection_result = analyze_source(str(image_path))
+    detection_result["annotated_filename"] = save_annotated_result(result, image_path.stem)
+    return {
+        "saved_filename": image_path.name,
+        "original_image_url": f"/uploads/{image_path.name}",
+        "image_url": f"/uploads/{detection_result['annotated_filename']}",
+        "detection_result": detection_result,
+        "source_type": "image",
+    }
+
+
+def run_video_detection(video_path):
+    capture = cv2.VideoCapture(str(video_path))
+    if not capture.isOpened():
+        raise ValueError("Unable to open the uploaded video.")
+
+    fps = capture.get(cv2.CAP_PROP_FPS) or 0.0
+    if fps <= 0:
+        fps = 1.0
+    sample_stride = max(int(round(fps * VIDEO_FRAME_SAMPLE_SECONDS)), 1)
+
+    frame_index = 0
+    sampled_frames = 0
+    selected_frame = None
+    selected_result = None
+    selected_detection = None
+    selected_frame_index = 0
+
+    while True:
+        ok, frame = capture.read()
+        if not ok:
+            break
+
+        if frame_index % sample_stride == 0:
+            sampled_frames += 1
+            result, detection_result = analyze_source(frame)
+
+            if selected_frame is None:
+                selected_frame = frame.copy()
+                selected_result = result
+                selected_detection = detection_result
+                selected_frame_index = frame_index
+
+            if detection_result["detection_type"] != "No Weapon":
+                selected_frame = frame.copy()
+                selected_result = result
+                selected_detection = detection_result
+                selected_frame_index = frame_index
+                break
+
+            if sampled_frames >= MAX_VIDEO_SAMPLE_FRAMES:
+                break
+
+        frame_index += 1
+
+    capture.release()
+
+    if selected_frame is None or selected_result is None or selected_detection is None:
+        raise ValueError("No readable frames were found in the uploaded video.")
+
+    frame_stem = f"{video_path.stem}_frame_{selected_frame_index:06d}"
+    frame_filename = f"{frame_stem}.jpg"
+    frame_path = UPLOADS_DIR / frame_filename
+    if not cv2.imwrite(str(frame_path), selected_frame):
+        raise ValueError("Failed to save the extracted frame from the video.")
+
+    selected_detection["annotated_filename"] = save_annotated_result(selected_result, frame_stem)
+
+    return {
+        "saved_filename": frame_filename,
+        "original_image_url": f"/uploads/{frame_filename}",
+        "image_url": f"/uploads/{selected_detection['annotated_filename']}",
+        "detection_result": selected_detection,
+        "source_type": "video",
+        "source_frame_index": selected_frame_index,
+        "source_timestamp_seconds": round(selected_frame_index / fps, 2),
+        "processed_frames": sampled_frames,
+    }
+
+
 @app.route("/")
 def home():
+    model_status = get_model_status()
     return jsonify(
         {
             "service": "AI Ranger - Wildlife Protection Monitoring",
             "status": "operational",
-            "model_path": str(MODEL_PATH),
-            "model_ready": MODEL_PATH.exists(),
             "email_notifications_configured": notifications_configured(),
+            "video_processing_enabled": True,
+            "video_frame_sample_seconds": VIDEO_FRAME_SAMPLE_SECONDS,
+            **model_status,
         }
     )
 
@@ -270,28 +422,46 @@ def login():
 def upload():
     file = request.files.get("image") or request.files.get("media")
     if file is None:
-        return jsonify({"error": "No image file provided"}), 400
+        return jsonify({"error": "No media file provided"}), 400
 
     if file.filename == "":
         return jsonify({"error": "No file selected"}), 400
 
-    ext = Path(file.filename).suffix or ".jpg"
+    video_upload = is_video_upload(file)
+    ext = Path(file.filename).suffix or (".mp4" if video_upload else ".jpg")
     filename = f"{uuid.uuid4().hex[:12]}{ext}"
     filepath = UPLOADS_DIR / filename
     file.save(str(filepath))
 
     try:
-        detection_result = run_detection(filepath)
+        media_result = run_video_detection(filepath) if video_upload else run_image_detection(filepath)
+    except FileNotFoundError as exc:
+        model_status = get_model_status()
+        return (
+            jsonify(
+                {
+                    "error": "Model is not configured for inference.",
+                    "message": str(exc),
+                    **model_status,
+                }
+            ),
+            503,
+        )
     except Exception as exc:
         return jsonify({"error": f"Model inference failed: {exc}"}), 500
+    finally:
+        if video_upload and filepath.exists():
+            filepath.unlink()
 
+    detection_result = media_result["detection_result"]
     annotated_path = UPLOADS_DIR / detection_result["annotated_filename"]
+
     detection = {
         "id": len(detections) + 1,
         "original_filename": file.filename,
-        "saved_filename": filename,
-        "original_image_url": f"/uploads/{filename}",
-        "image_url": f"/uploads/{detection_result['annotated_filename']}",
+        "saved_filename": media_result["saved_filename"],
+        "original_image_url": media_result["original_image_url"],
+        "image_url": media_result["image_url"],
         "detection_type": detection_result["detection_type"],
         "confidence": detection_result["confidence"],
         "severity": detection_result["severity"],
@@ -299,7 +469,13 @@ def upload():
         "detections": detection_result["detections"],
         "location": random.choice(LOCATIONS),
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "source_type": media_result["source_type"],
     }
+
+    if media_result["source_type"] == "video":
+        detection["source_frame_index"] = media_result["source_frame_index"]
+        detection["source_timestamp_seconds"] = media_result["source_timestamp_seconds"]
+        detection["processed_frames"] = media_result["processed_frames"]
 
     if detection["detection_type"] != "No Weapon":
         detection["notification"] = send_detection_email(detection, annotated_path)
@@ -327,15 +503,14 @@ def get_analysis():
     no_weapon_count = sum(1 for d in detections if d["detection_type"] == "No Weapon")
     critical_count = sum(1 for d in detections if d["severity"] == "critical")
 
-    timeline = []
-    for d in detections[:20]:
-        timeline.append(
-            {
-                "time": d["timestamp"],
-                "type": d["detection_type"],
-                "confidence": d["confidence"],
-            }
-        )
+    timeline = [
+        {
+            "time": d["timestamp"],
+            "type": d["detection_type"],
+            "confidence": d["confidence"],
+        }
+        for d in detections[:20]
+    ]
 
     total = len(detections)
     weapons = gun_count + knife_count
@@ -359,7 +534,6 @@ def serve_upload(filename):
     return send_from_directory(str(UPLOADS_DIR), filename)
 
 
-# ---------------------------------------------------------------------------
 if __name__ == "__main__":
     print("=" * 55)
     print("  AI Ranger - Wildlife Protection Monitoring")

@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import {
   Upload, Shield, AlertTriangle, Activity, Clock,
-  Camera, Crosshair, Zap, X,
+  Camera, Crosshair, Zap, X, Film,
 } from "lucide-react";
 
 function DashboardPage() {
@@ -9,12 +9,17 @@ function DashboardPage() {
   const [detections, setDetections] = useState([]);
   const [uploading, setUploading] = useState(false);
   const [previewUrl, setPreviewUrl] = useState(null);
+  const [previewKind, setPreviewKind] = useState("image");
   const [lastResult, setLastResult] = useState(null);
   const [showAlert, setShowAlert] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
+  const [systemStatus, setSystemStatus] = useState(null);
   const fileInputRef = useRef(null);
 
-  useEffect(() => { fetchHistory(); }, []);
+  useEffect(() => {
+    fetchHistory();
+    fetchSystemStatus();
+  }, []);
 
   const fetchHistory = async () => {
     try {
@@ -30,10 +35,28 @@ function DashboardPage() {
     }
   };
 
+  const fetchSystemStatus = async () => {
+    try {
+      const res = await fetch("/");
+      const data = await res.json();
+      setSystemStatus(data);
+    } catch (err) {
+      console.error("Failed to fetch system status:", err);
+    }
+  };
+
+  const formatUploadError = (data) => {
+    if (data?.model_ready === false) {
+      return data.hint || data.error || "The detection model is not configured.";
+    }
+    return data?.error || data?.message || "Upload failed";
+  };
+
   const handleFileSelect = (e) => {
     const file = e.target.files[0];
     if (!file) return;
     setErrorMessage("");
+    setPreviewKind(file.type.startsWith("video/") ? "video" : "image");
     setPreviewUrl(URL.createObjectURL(file));
     setLastResult(null);
     handleUpload(file);
@@ -47,10 +70,11 @@ function DashboardPage() {
       const res = await fetch("/upload", { method: "POST", body: formData });
       const data = await res.json();
       if (!res.ok || !data.success) {
-        throw new Error(data.error || data.message || "Upload failed");
+        throw new Error(formatUploadError(data));
       }
 
       setLastResult(data.detection);
+      setPreviewKind("image");
       setPreviewUrl(data.detection.image_url);
       setDetections((prev) => [data.detection, ...prev]);
       setStats((prev) => ({
@@ -65,12 +89,14 @@ function DashboardPage() {
     } catch (err) {
       console.error("Upload failed:", err);
       setErrorMessage(err.message || "Upload failed");
+      fetchSystemStatus();
     } finally {
       setUploading(false);
     }
   };
 
   const recentAlerts = detections.slice(0, 3);
+  const modelNotReady = systemStatus?.model_ready === false;
 
   return (
     <div className="dashboard-page">
@@ -87,7 +113,7 @@ function DashboardPage() {
       <div className="page-header">
         <div>
           <h2>Wildlife Forest Threat Monitoring</h2>
-          <p>Analyze ranger camera frames for illegal weapons near protected animals</p>
+          <p>Process camera frames or videos to detect illegal weapons near protected animals</p>
         </div>
         <div className="live-badge"><span className="live-dot"></span>LIVE MONITORING</div>
       </div>
@@ -112,13 +138,16 @@ function DashboardPage() {
       </div>
 
       <div className="dashboard-grid">
-        {/* CCTV Feed Simulation */}
         <div className="cctv-section glass-card">
           <div className="section-header"><Camera size={20} /><h3>Forest Camera Review</h3></div>
           <div className="cctv-viewport">
             {previewUrl ? (
               <div className="cctv-preview">
-                <img src={previewUrl} alt="Forest camera frame" />
+                {previewKind === "video" ? (
+                  <video src={previewUrl} controls muted className="cctv-video-preview" />
+                ) : (
+                  <img src={previewUrl} alt="Forest camera frame" />
+                )}
                 <div className="cctv-overlay">
                   <div className="scan-line"></div>
                   <div className="cctv-corners">
@@ -133,18 +162,33 @@ function DashboardPage() {
                 {uploading && (
                   <div className="analyzing-overlay">
                     <div className="analyzing-spinner"></div>
-                    <span>Analyzing frame...</span>
+                    <span>{previewKind === "video" ? "Extracting and analyzing frames..." : "Analyzing frame..."}</span>
                   </div>
                 )}
               </div>
             ) : (
-              <div className="cctv-placeholder"><Camera size={48} /><p>Upload a forest surveillance frame to run the weapon detector</p></div>
+              <div className="cctv-placeholder">
+                <Film size={48} />
+                <p>Upload a forest surveillance frame or short video to run the weapon detector</p>
+              </div>
             )}
           </div>
+          {modelNotReady && (
+            <div className="detection-result threat">
+              <div className="result-header">
+                <AlertTriangle size={20} />
+                <span className="result-type">Model Setup Required</span>
+              </div>
+              <div className="result-details">
+                <span>{systemStatus.hint}</span>
+                <span>Set <code>MODEL_PATH</code> in <code>backend/.env</code> or place the trained file at <code>model/runs/train/weapon_detector2/weights/best.pt</code>.</span>
+              </div>
+            </div>
+          )}
           <div className="cctv-controls">
-            <input type="file" ref={fileInputRef} onChange={handleFileSelect} accept="image/*" hidden />
-            <button className="upload-btn" onClick={() => fileInputRef.current?.click()} disabled={uploading}>
-              <Upload size={18} /><span>{uploading ? "Analyzing..." : "Upload Camera Frame"}</span>
+            <input type="file" ref={fileInputRef} onChange={handleFileSelect} accept="image/*,video/*" hidden />
+            <button className="upload-btn" onClick={() => fileInputRef.current?.click()} disabled={uploading || modelNotReady}>
+              <Upload size={18} /><span>{modelNotReady ? "Configure Model To Upload" : uploading ? "Analyzing..." : "Upload Image Or Video"}</span>
             </button>
           </div>
           {errorMessage && (
@@ -165,9 +209,13 @@ function DashboardPage() {
                 <span className="result-type">{lastResult.detection_type}</span>
               </div>
               <div className="result-details">
+                <span>Source: {lastResult.source_type === "video" ? "Video" : "Image"}</span>
                 <span>Confidence: {(lastResult.confidence * 100).toFixed(0)}%</span>
                 <span>Location: {lastResult.location}</span>
                 <span>Objects Found: {lastResult.detection_count || 0}</span>
+                {lastResult.source_type === "video" && (
+                  <span>Alert Frame: {lastResult.source_timestamp_seconds?.toFixed(2)}s</span>
+                )}
                 {lastResult.notification && (
                   <span>Email Alert: {lastResult.notification.message}</span>
                 )}
@@ -176,12 +224,11 @@ function DashboardPage() {
           )}
         </div>
 
-        {/* Alert Panel */}
         <div className="alert-section glass-card">
           <div className="section-header"><AlertTriangle size={20} /><h3>Recent Alerts</h3></div>
           <div className="alert-list">
             {recentAlerts.length === 0 ? (
-              <div className="no-alerts"><Shield size={32} /><p>No detections yet</p><span>Upload a camera frame to begin</span></div>
+              <div className="no-alerts"><Shield size={32} /><p>No detections yet</p><span>Upload a frame or video to begin</span></div>
             ) : (
               recentAlerts.map((alert, index) => (
                 <div key={alert.id} className={`alert-item ${alert.severity}`} style={{ animationDelay: `${index * 0.1}s` }}>
