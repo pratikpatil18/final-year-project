@@ -57,6 +57,12 @@ npm run install:frontend
 npm run setup:backend
 ```
 
+On Windows, if `python3` is not available, use:
+
+```powershell
+npm run setup:backend:win
+```
+
 This installs:
 
 - frontend dependencies into `frontend/node_modules`

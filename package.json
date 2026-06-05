@@ -3,12 +3,16 @@
   "private": true,
   "scripts": {
     "backend:venv": "python3 -m venv backend/.venv",
+    "backend:venv:win": "if not exist backend\\.venv py -3 -m venv backend/.venv",
     "backend:dev": "backend/.venv/bin/python backend/app.py",
+    "backend:dev:win": ".\\backend\\.venv\\Scripts\\python.exe .\\backend\\app.py",
     "frontend:dev": "npm --prefix frontend run dev",
     "dev": "npm --prefix frontend run dev",
     "install:frontend": "npm --prefix frontend install",
     "install:backend": "backend/.venv/bin/pip install -r backend/requirements.txt",
+    "install:backend:win": ".\\backend\\.venv\\Scripts\\python.exe -m pip install -r backend\\requirements.txt",
     "setup:backend": "npm run backend:venv && npm run install:backend",
+    "setup:backend:win": "npm run backend:venv:win && npm run install:backend:win",
     "build": "npm --prefix frontend run build"
   }
 }
