@@ -57,12 +57,6 @@ npm run install:frontend
 npm run setup:backend
 ```
 
-On Windows, if `python3` is not available, use:
-
-```powershell
-npm run setup:backend:win
-```
-
 This installs:
 
 - frontend dependencies into `frontend/node_modules`
@@ -85,6 +79,8 @@ npm run frontend:dev
 ```
 
 The dashboard runs on `http://localhost:3000`.
+
+On Windows, the `:win` script aliases still exist, but the default scripts now work there too.
 
 ## How To Use
 
