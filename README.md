@@ -15,13 +15,14 @@ model/     Training code, dataset assets, and expected YOLO weight locations
 - Python 3.10+
 - Node.js 18+
 - npm
+- MySQL 8+
 
 ## Configuration
 
 The backend reads its settings from `backend/.env`.
 
 1. Copy `backend/.env.example` to `backend/.env` if it is not already present.
-2. Update the SMTP values with your real email account and recipient address.
+2. Update the MySQL and SMTP values for your machine.
 
 Example:
 
@@ -29,6 +30,16 @@ Example:
 DETECTION_CONFIDENCE=0.35
 VIDEO_FRAME_SAMPLE_SECONDS=1.0
 MAX_VIDEO_SAMPLE_FRAMES=180
+MYSQL_HOST=127.0.0.1
+MYSQL_PORT=3306
+MYSQL_USER=root
+MYSQL_PASSWORD=your-mysql-password
+MYSQL_DATABASE=ai_ranger
+ADMIN_USERNAME=sysadmin
+ADMIN_PASSWORD=Pass@123
+ADMIN_NAME=System Admin
+ADMIN_EMAIL=admin@airanger.com
+ADMIN_ROLE=System Administrator
 SMTP_HOST=smtp.gmail.com
 SMTP_PORT=587
 SMTP_USERNAME=your-email@gmail.com
@@ -38,6 +49,15 @@ ALERT_FROM_EMAIL=your-email@gmail.com
 ALERT_TO_EMAIL=receiver@example.com
 ALERT_SUBJECT_PREFIX=AI Ranger Alert
 ```
+
+## Database
+
+The backend now uses MySQL for:
+
+- `admin_users`: stores the admin login with a hashed password
+- `detection_history`: stores every detection result shown in the dashboard
+
+When the Flask app starts, it will create the database and both tables automatically if the configured MySQL user has permission. A reference schema is also included at `backend/schema.sql`.
 
 ## Model File
 
@@ -86,7 +106,7 @@ On Windows, the `:win` script aliases still exist, but the default scripts now w
 
 1. Open `http://localhost:3000`
 2. Log in with:
-   `sysadmin` / `Pass@123`
+   the `ADMIN_USERNAME` / `ADMIN_PASSWORD` values from `backend/.env`
 3. Upload an image or video
 4. The backend will:
    - analyze the image directly, or
@@ -100,4 +120,5 @@ On Windows, the `:win` script aliases still exist, but the default scripts now w
 
 - Videos are sampled using `VIDEO_FRAME_SAMPLE_SECONDS`.
 - Uploaded media and generated annotated frames are stored in `backend/uploads/`.
+- Login and detection history are persisted in MySQL instead of in-memory storage.
 - If SMTP is not configured correctly, detection still works but email sending fails.

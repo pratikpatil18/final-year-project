@@ -3,3 +3,4 @@ flask-cors
 ultralytics
 python-dotenv
 opencv-python
+mysql-connector-python

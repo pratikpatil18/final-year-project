@@ -1,30 +1,41 @@
-from flask import Flask
-from flask_sqlalchemy import SQLAlchemy
-from datetime import datetime  # Added this import
+import os
 
-# Initialize Flask app (same as in app.py)
-app = Flask(__name__)
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///database.db'  # Adjust path if needed
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-db = SQLAlchemy(app)
+from dotenv import load_dotenv
 
-# Define the Detection model (must match app.py)
-class Detection(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
-    weapon_type = db.Column(db.String(50))
-    location = db.Column(db.String(50))
-    screenshot_path = db.Column(db.String(200))
+try:
+    import mysql.connector
+except ImportError as exc:
+    raise SystemExit(
+        "mysql-connector-python is not installed. Run the backend setup again before clearing data."
+    ) from exc
+
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(BASE_DIR, ".env"))
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1").strip()
+MYSQL_PORT = int(os.getenv("MYSQL_PORT", "3306"))
+MYSQL_USER = os.getenv("MYSQL_USER", "root").strip()
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "").strip()
+MYSQL_DATABASE = os.getenv("MYSQL_DATABASE", "ai_ranger").strip()
+
 
 def clear_detections():
-    with app.app_context():  # Required for database operations
-        try:
-            num_deleted = db.session.query(Detection).delete()  # Delete all rows
-            db.session.commit()
-            print(f"Successfully deleted {num_deleted} detection records.")
-        except Exception as e:
-            db.session.rollback()
-            print(f"Error clearing database: {str(e)}")
+    connection = mysql.connector.connect(
+        host=MYSQL_HOST,
+        port=MYSQL_PORT,
+        user=MYSQL_USER,
+        password=MYSQL_PASSWORD,
+        database=MYSQL_DATABASE,
+    )
+    cursor = connection.cursor()
+    cursor.execute("DELETE FROM detection_history")
+    deleted_rows = cursor.rowcount
+    connection.commit()
+    cursor.close()
+    connection.close()
+    print(f"Successfully deleted {deleted_rows} detection history rows.")
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     clear_detections()

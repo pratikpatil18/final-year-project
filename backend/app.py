@@ -3,6 +3,7 @@ import os
 import random
 import smtplib
 import uuid
+import json
 from datetime import datetime
 from email.message import EmailMessage
 from pathlib import Path
@@ -12,6 +13,14 @@ from dotenv import load_dotenv
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 from ultralytics import YOLO
+from werkzeug.security import check_password_hash, generate_password_hash
+
+try:
+    import mysql.connector
+    from mysql.connector import Error as MySQLError
+except ImportError:
+    mysql = None
+    MySQLError = Exception
 
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = BASE_DIR.parent
@@ -39,13 +48,21 @@ SMTP_USE_TLS = os.getenv("SMTP_USE_TLS", "true").strip().lower() in {"1", "true"
 ALERT_FROM_EMAIL = os.getenv("ALERT_FROM_EMAIL", SMTP_USERNAME).strip()
 ALERT_TO_EMAIL = os.getenv("ALERT_TO_EMAIL", "").strip()
 ALERT_SUBJECT_PREFIX = os.getenv("ALERT_SUBJECT_PREFIX", "AI Ranger Alert").strip()
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1").strip()
+MYSQL_PORT = int(os.getenv("MYSQL_PORT", "3306"))
+MYSQL_USER = os.getenv("MYSQL_USER", "root").strip()
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "").strip()
+MYSQL_DATABASE = os.getenv("MYSQL_DATABASE", "ai_ranger").strip()
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "sysadmin").strip()
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "Pass@123").strip()
+ADMIN_NAME = os.getenv("ADMIN_NAME", "System Admin").strip()
+ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "admin@airanger.com").strip()
+ADMIN_ROLE = os.getenv("ADMIN_ROLE", "System Administrator").strip()
 
-detections = []
 model = None
 loaded_model_path = None
-
-ADMIN_USERNAME = "sysadmin"
-ADMIN_PASSWORD = "Pass@123"
+DATABASE_READY = False
+DATABASE_ERROR = ""
 
 LOCATIONS = [
     "North Forest Gate",
@@ -57,6 +74,334 @@ LOCATIONS = [
     "Salt Lick Camera 2",
     "Boundary Fence South",
 ]
+
+
+def mysql_driver_available():
+    return mysql is not None
+
+
+def database_configured():
+    return bool(MYSQL_HOST and MYSQL_USER and MYSQL_DATABASE)
+
+
+def build_database_error(message):
+    return (
+        f"{message} Configure MYSQL_HOST, MYSQL_PORT, MYSQL_USER, MYSQL_PASSWORD, "
+        f"and MYSQL_DATABASE in backend/.env."
+    )
+
+
+def open_database_connection(include_database=True):
+    if not mysql_driver_available():
+        raise RuntimeError(
+            "mysql-connector-python is not installed. Run the backend setup again to install it."
+        )
+
+    if not database_configured():
+        raise RuntimeError(build_database_error("MySQL is not configured."))
+
+    connection_settings = {
+        "host": MYSQL_HOST,
+        "port": MYSQL_PORT,
+        "user": MYSQL_USER,
+        "password": MYSQL_PASSWORD,
+    }
+    if include_database:
+        connection_settings["database"] = MYSQL_DATABASE
+    return mysql.connector.connect(**connection_settings)
+
+
+def initialize_database():
+    global DATABASE_ERROR, DATABASE_READY
+
+    if DATABASE_READY:
+        return True
+
+    if not mysql_driver_available():
+        DATABASE_ERROR = "mysql-connector-python is not installed."
+        return False
+
+    if not database_configured():
+        DATABASE_ERROR = build_database_error("MySQL is not configured.")
+        return False
+
+    try:
+        bootstrap_connection = open_database_connection(include_database=False)
+        bootstrap_cursor = bootstrap_connection.cursor()
+        bootstrap_cursor.execute(
+            f"CREATE DATABASE IF NOT EXISTS `{MYSQL_DATABASE}` "
+            "CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+        )
+        bootstrap_cursor.close()
+        bootstrap_connection.close()
+
+        connection = open_database_connection(include_database=True)
+        cursor = connection.cursor()
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS admin_users (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                username VARCHAR(100) NOT NULL UNIQUE,
+                password_hash VARCHAR(255) NOT NULL,
+                full_name VARCHAR(150) NOT NULL,
+                email VARCHAR(200) NOT NULL,
+                role VARCHAR(100) NOT NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS detection_history (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                original_filename VARCHAR(255) NOT NULL,
+                saved_filename VARCHAR(255) NOT NULL,
+                original_image_url VARCHAR(255) NOT NULL,
+                image_url VARCHAR(255) NOT NULL,
+                detection_type VARCHAR(100) NOT NULL,
+                confidence FLOAT NOT NULL,
+                severity VARCHAR(32) NOT NULL,
+                detection_count INT NOT NULL DEFAULT 0,
+                detections_json LONGTEXT NOT NULL,
+                location VARCHAR(150) NOT NULL,
+                timestamp DATETIME NOT NULL,
+                source_type VARCHAR(32) NOT NULL,
+                source_frame_index INT NULL,
+                source_timestamp_seconds FLOAT NULL,
+                processed_frames INT NULL,
+                notification_status VARCHAR(64) NULL,
+                notification_message TEXT NULL
+            )
+            """
+        )
+        cursor.execute(
+            """
+            INSERT INTO admin_users (username, password_hash, full_name, email, role)
+            VALUES (%s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+                password_hash = VALUES(password_hash),
+                full_name = VALUES(full_name),
+                email = VALUES(email),
+                role = VALUES(role)
+            """,
+            (
+                ADMIN_USERNAME,
+                generate_password_hash(ADMIN_PASSWORD),
+                ADMIN_NAME,
+                ADMIN_EMAIL,
+                ADMIN_ROLE,
+            ),
+        )
+        connection.commit()
+        cursor.close()
+        connection.close()
+        DATABASE_READY = True
+        DATABASE_ERROR = ""
+        return True
+    except (MySQLError, RuntimeError) as exc:
+        DATABASE_READY = False
+        DATABASE_ERROR = str(exc)
+        return False
+
+
+def require_database():
+    if initialize_database():
+        return
+    raise RuntimeError(DATABASE_ERROR or "Unable to connect to the MySQL database.")
+
+
+def get_database_status():
+    initialize_database()
+    return {
+        "database_ready": DATABASE_READY,
+        "database_host": MYSQL_HOST,
+        "database_port": MYSQL_PORT,
+        "database_name": MYSQL_DATABASE,
+        "database_error": DATABASE_ERROR or None,
+        "mysql_driver_installed": mysql_driver_available(),
+    }
+
+
+def parse_detection_items(detections_json):
+    if not detections_json:
+        return []
+
+    try:
+        parsed = json.loads(detections_json)
+    except json.JSONDecodeError:
+        return []
+
+    return parsed if isinstance(parsed, list) else []
+
+
+def row_to_detection(row):
+    timestamp = row["timestamp"]
+    if isinstance(timestamp, datetime):
+        timestamp_value = timestamp.strftime("%Y-%m-%d %H:%M:%S")
+    else:
+        timestamp_value = str(timestamp)
+
+    detection = {
+        "id": row["id"],
+        "original_filename": row["original_filename"],
+        "saved_filename": row["saved_filename"],
+        "original_image_url": row["original_image_url"],
+        "image_url": row["image_url"],
+        "detection_type": row["detection_type"],
+        "confidence": float(row["confidence"]),
+        "severity": row["severity"],
+        "detection_count": int(row["detection_count"]),
+        "detections": parse_detection_items(row["detections_json"]),
+        "location": row["location"],
+        "timestamp": timestamp_value,
+        "source_type": row["source_type"],
+        "notification": {
+            "sent": row["notification_status"] == "sent",
+            "status": row["notification_status"] or "unknown",
+            "message": row["notification_message"] or "",
+        },
+    }
+
+    if row["source_frame_index"] is not None:
+        detection["source_frame_index"] = int(row["source_frame_index"])
+    if row["source_timestamp_seconds"] is not None:
+        detection["source_timestamp_seconds"] = float(row["source_timestamp_seconds"])
+    if row["processed_frames"] is not None:
+        detection["processed_frames"] = int(row["processed_frames"])
+
+    return detection
+
+
+def get_history_records(limit=None):
+    require_database()
+    try:
+        connection = open_database_connection()
+        cursor = connection.cursor(dictionary=True)
+
+        query = """
+            SELECT
+                id,
+                original_filename,
+                saved_filename,
+                original_image_url,
+                image_url,
+                detection_type,
+                confidence,
+                severity,
+                detection_count,
+                detections_json,
+                location,
+                timestamp,
+                source_type,
+                source_frame_index,
+                source_timestamp_seconds,
+                processed_frames,
+                notification_status,
+                notification_message
+            FROM detection_history
+            ORDER BY timestamp DESC, id DESC
+        """
+        params = ()
+        if limit is not None:
+            query += " LIMIT %s"
+            params = (limit,)
+
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        cursor.close()
+        connection.close()
+        return [row_to_detection(row) for row in rows]
+    except MySQLError as exc:
+        raise RuntimeError(f"MySQL query failed: {exc}") from exc
+
+
+def insert_detection_record(detection, detected_at):
+    require_database()
+    try:
+        connection = open_database_connection()
+        cursor = connection.cursor()
+        notification = detection.get("notification") or {}
+        cursor.execute(
+            """
+            INSERT INTO detection_history (
+                original_filename,
+                saved_filename,
+                original_image_url,
+                image_url,
+                detection_type,
+                confidence,
+                severity,
+                detection_count,
+                detections_json,
+                location,
+                timestamp,
+                source_type,
+                source_frame_index,
+                source_timestamp_seconds,
+                processed_frames,
+                notification_status,
+                notification_message
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                detection["original_filename"],
+                detection["saved_filename"],
+                detection["original_image_url"],
+                detection["image_url"],
+                detection["detection_type"],
+                detection["confidence"],
+                detection["severity"],
+                detection["detection_count"],
+                json.dumps(detection["detections"]),
+                detection["location"],
+                detected_at,
+                detection["source_type"],
+                detection.get("source_frame_index"),
+                detection.get("source_timestamp_seconds"),
+                detection.get("processed_frames"),
+                notification.get("status"),
+                notification.get("message"),
+            ),
+        )
+        connection.commit()
+        inserted_id = cursor.lastrowid
+        cursor.close()
+        connection.close()
+        return inserted_id
+    except MySQLError as exc:
+        raise RuntimeError(f"MySQL insert failed: {exc}") from exc
+
+
+def authenticate_admin(username, password):
+    require_database()
+    try:
+        connection = open_database_connection()
+        cursor = connection.cursor(dictionary=True)
+        cursor.execute(
+            """
+            SELECT username, password_hash, full_name, email, role
+            FROM admin_users
+            WHERE username = %s
+            LIMIT 1
+            """,
+            (username,),
+        )
+        admin_user = cursor.fetchone()
+        cursor.close()
+        connection.close()
+    except MySQLError as exc:
+        raise RuntimeError(f"MySQL login lookup failed: {exc}") from exc
+
+    if admin_user and check_password_hash(admin_user["password_hash"], password):
+        return {
+            "username": admin_user["username"],
+            "role": admin_user["role"],
+            "name": admin_user["full_name"],
+            "email": admin_user["email"],
+        }
+
+    return None
 
 
 def configured_model_path():
@@ -385,6 +730,7 @@ def build_status_payload():
         "email_notifications_configured": notifications_configured(),
         "video_processing_enabled": True,
         "video_frame_sample_seconds": VIDEO_FRAME_SAMPLE_SECONDS,
+        **get_database_status(),
         **model_status,
     }
 
@@ -404,17 +750,17 @@ def login():
     username = data.get("username", "")
     password = data.get("password", "")
 
-    if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
+    try:
+        user = authenticate_admin(username, password)
+    except RuntimeError as exc:
+        return jsonify({"success": False, "message": str(exc), **get_database_status()}), 503
+
+    if user:
         return jsonify(
             {
                 "success": True,
                 "message": "Authentication successful",
-                "user": {
-                    "username": username,
-                    "role": "System Administrator",
-                    "name": "System Admin",
-                    "email": "admin@airanger.com",
-                },
+                "user": user,
             }
         )
 
@@ -423,6 +769,11 @@ def login():
 
 @app.route("/upload", methods=["POST"])
 def upload():
+    try:
+        require_database()
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc), **get_database_status()}), 503
+
     file = request.files.get("image") or request.files.get("media")
     if file is None:
         return jsonify({"error": "No media file provided"}), 400
@@ -458,9 +809,9 @@ def upload():
 
     detection_result = media_result["detection_result"]
     annotated_path = UPLOADS_DIR / detection_result["annotated_filename"]
+    detected_at = datetime.now()
 
     detection = {
-        "id": len(detections) + 1,
         "original_filename": file.filename,
         "saved_filename": media_result["saved_filename"],
         "original_image_url": media_result["original_image_url"],
@@ -471,7 +822,7 @@ def upload():
         "detection_count": len(detection_result["detections"]),
         "detections": detection_result["detections"],
         "location": random.choice(LOCATIONS),
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "timestamp": detected_at.strftime("%Y-%m-%d %H:%M:%S"),
         "source_type": media_result["source_type"],
     }
 
@@ -489,18 +840,31 @@ def upload():
             "message": "No email sent because no weapon was detected.",
         }
 
-    detections.insert(0, detection)
+    try:
+        detection["id"] = insert_detection_record(detection, detected_at)
+    except RuntimeError as exc:
+        return jsonify({"error": f"Detection completed but could not be saved: {exc}"}), 500
 
     return jsonify({"success": True, "detection": detection})
 
 
 @app.route("/history", methods=["GET"])
 def get_history():
+    try:
+        detections = get_history_records()
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc), **get_database_status()}), 503
+
     return jsonify({"detections": detections, "total": len(detections)})
 
 
 @app.route("/analysis", methods=["GET"])
 def get_analysis():
+    try:
+        detections = get_history_records()
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc), **get_database_status()}), 503
+
     gun_count = sum(1 for d in detections if d["detection_type"] == "Gun")
     knife_count = sum(1 for d in detections if d["detection_type"] == "Knife")
     no_weapon_count = sum(1 for d in detections if d["detection_type"] == "No Weapon")
