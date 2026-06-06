@@ -10,16 +10,31 @@ function DashboardPage() {
   const [uploading, setUploading] = useState(false);
   const [previewUrl, setPreviewUrl] = useState(null);
   const [previewKind, setPreviewKind] = useState("image");
+  const [resultPreviewUrl, setResultPreviewUrl] = useState(null);
   const [lastResult, setLastResult] = useState(null);
   const [showAlert, setShowAlert] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
   const [systemStatus, setSystemStatus] = useState(null);
   const fileInputRef = useRef(null);
+  const alertTimeoutRef = useRef(null);
 
   useEffect(() => {
     fetchHistory();
     fetchSystemStatus();
+    return () => {
+      if (alertTimeoutRef.current) {
+        clearTimeout(alertTimeoutRef.current);
+      }
+    };
   }, []);
+
+  useEffect(() => {
+    return () => {
+      if (previewUrl?.startsWith("blob:")) {
+        URL.revokeObjectURL(previewUrl);
+      }
+    };
+  }, [previewUrl]);
 
   const fetchHistory = async () => {
     try {
@@ -37,7 +52,7 @@ function DashboardPage() {
 
   const fetchSystemStatus = async () => {
     try {
-      const res = await fetch("/");
+      const res = await fetch("/status");
       const data = await res.json();
       setSystemStatus(data);
     } catch (err) {
@@ -55,9 +70,16 @@ function DashboardPage() {
   const handleFileSelect = (e) => {
     const file = e.target.files[0];
     if (!file) return;
+
+    if (previewUrl?.startsWith("blob:")) {
+      URL.revokeObjectURL(previewUrl);
+    }
+
     setErrorMessage("");
+    setShowAlert(false);
     setPreviewKind(file.type.startsWith("video/") ? "video" : "image");
     setPreviewUrl(URL.createObjectURL(file));
+    setResultPreviewUrl(null);
     setLastResult(null);
     handleUpload(file);
   };
@@ -74,8 +96,7 @@ function DashboardPage() {
       }
 
       setLastResult(data.detection);
-      setPreviewKind("image");
-      setPreviewUrl(data.detection.image_url);
+      setResultPreviewUrl(data.detection.image_url);
       setDetections((prev) => [data.detection, ...prev]);
       setStats((prev) => ({
         ...prev,
@@ -84,7 +105,10 @@ function DashboardPage() {
       }));
       if (data.detection.detection_type !== "No Weapon") {
         setShowAlert(true);
-        setTimeout(() => setShowAlert(false), 5000);
+        if (alertTimeoutRef.current) {
+          clearTimeout(alertTimeoutRef.current);
+        }
+        alertTimeoutRef.current = setTimeout(() => setShowAlert(false), 5000);
       }
     } catch (err) {
       console.error("Upload failed:", err);
@@ -104,7 +128,7 @@ function DashboardPage() {
         <div className="alert-overlay">
           <div className="alert-banner">
             <AlertTriangle size={24} />
-            <span>⚠️ THREAT DETECTED: {lastResult.detection_type.toUpperCase()} at {lastResult.location}</span>
+            <span>THREAT DETECTED: {lastResult.detection_type.toUpperCase()} at {lastResult.location}</span>
             <button onClick={() => setShowAlert(false)}><X size={18} /></button>
           </div>
         </div>
@@ -144,7 +168,15 @@ function DashboardPage() {
             {previewUrl ? (
               <div className="cctv-preview">
                 {previewKind === "video" ? (
-                  <video src={previewUrl} controls muted className="cctv-video-preview" />
+                  <video
+                    src={previewUrl}
+                    controls
+                    autoPlay
+                    muted
+                    loop
+                    playsInline
+                    className="cctv-video-preview"
+                  />
                 ) : (
                   <img src={previewUrl} alt="Forest camera frame" />
                 )}
@@ -156,7 +188,7 @@ function DashboardPage() {
                   </div>
                   <div className="cctv-info">
                     <span>CAM-01 | {new Date().toLocaleTimeString()}</span>
-                    <span className="rec-badge">● REC</span>
+                    <span className="rec-badge">REC</span>
                   </div>
                 </div>
                 {uploading && (
@@ -191,6 +223,17 @@ function DashboardPage() {
               <Upload size={18} /><span>{modelNotReady ? "Configure Model To Upload" : uploading ? "Analyzing..." : "Upload Image Or Video"}</span>
             </button>
           </div>
+          {resultPreviewUrl && lastResult && !uploading && (
+            <div className="detected-frame-card">
+              <div className="section-header">
+                <Crosshair size={20} />
+                <h3>{lastResult.source_type === "video" ? "Detected Video Frame" : "Annotated Detection Result"}</h3>
+              </div>
+              <div className="detected-frame-preview">
+                <img src={resultPreviewUrl} alt={`${lastResult.detection_type} detection result`} />
+              </div>
+            </div>
+          )}
           {errorMessage && (
             <div className="detection-result threat">
               <div className="result-header">
@@ -215,6 +258,9 @@ function DashboardPage() {
                 <span>Objects Found: {lastResult.detection_count || 0}</span>
                 {lastResult.source_type === "video" && (
                   <span>Alert Frame: {lastResult.source_timestamp_seconds?.toFixed(2)}s</span>
+                )}
+                {lastResult.source_type === "video" && (
+                  <span>Frames Sampled: {lastResult.processed_frames || 0}</span>
                 )}
                 {lastResult.notification && (
                   <span>Email Alert: {lastResult.notification.message}</span>

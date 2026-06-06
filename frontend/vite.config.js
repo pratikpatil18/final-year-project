@@ -6,6 +6,7 @@ export default defineConfig({
   server: {
     port: 3000,
     proxy: {
+      "/status": "http://localhost:5000",
       "/login": "http://localhost:5000",
       "/upload": "http://localhost:5000",
       "/history": "http://localhost:5000",

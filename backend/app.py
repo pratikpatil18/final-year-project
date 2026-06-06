@@ -377,19 +377,22 @@ def run_video_detection(video_path):
     }
 
 
-@app.route("/")
-def home():
+def build_status_payload():
     model_status = get_model_status()
-    return jsonify(
-        {
-            "service": "AI Ranger - Wildlife Protection Monitoring",
-            "status": "operational",
-            "email_notifications_configured": notifications_configured(),
-            "video_processing_enabled": True,
-            "video_frame_sample_seconds": VIDEO_FRAME_SAMPLE_SECONDS,
-            **model_status,
-        }
-    )
+    return {
+        "service": "AI Ranger - Wildlife Protection Monitoring",
+        "status": "operational",
+        "email_notifications_configured": notifications_configured(),
+        "video_processing_enabled": True,
+        "video_frame_sample_seconds": VIDEO_FRAME_SAMPLE_SECONDS,
+        **model_status,
+    }
+
+
+@app.route("/")
+@app.route("/status")
+def home():
+    return jsonify(build_status_payload())
 
 
 @app.route("/login", methods=["POST"])

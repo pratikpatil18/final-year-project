@@ -885,6 +885,14 @@ input {
   display: block;
 }
 
+.cctv-video-preview {
+  width: 100%;
+  height: 320px;
+  object-fit: cover;
+  display: block;
+  background: #02050b;
+}
+
 .cctv-overlay {
   position: absolute;
   inset: 0;
@@ -986,6 +994,32 @@ input {
   margin-top: 16px;
 }
 
+.detected-frame-card {
+  margin-top: 18px;
+  padding: 18px;
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border);
+  animation: fadeIn 0.4s var(--ease);
+}
+
+.detected-frame-card .section-header {
+  margin-bottom: 14px;
+}
+
+.detected-frame-preview {
+  overflow: hidden;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: var(--bg-secondary);
+}
+
+.detected-frame-preview img {
+  width: 100%;
+  max-height: 260px;
+  object-fit: cover;
+}
+
 .upload-btn {
   display: flex;
   align-items: center;
@@ -1054,6 +1088,7 @@ input {
 .result-details {
   display: flex;
   gap: 20px;
+  flex-wrap: wrap;
   font-size: 0.8rem;
   color: var(--text-secondary);
 }
@@ -1659,6 +1694,12 @@ input {
 
   .settings-grid {
     grid-template-columns: 1fr;
+  }
+
+  .cctv-preview img,
+  .cctv-video-preview,
+  .cctv-placeholder {
+    height: 260px;
   }
 
   .settings-form {
